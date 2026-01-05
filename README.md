@@ -476,7 +476,7 @@ python scripts/infer.py --checkpoint checkpoints/best_model.pt --input new_data.
 
 ```bash
 # 提取特征并保存
-python scripts/extract_features.py --checkpoint checkpoints/best_model.pt --data_path TDdata/TrainData.csv --output features train_features.npz --save_labels
+python scripts/extract_features.py --checkpoint checkpoints/best_model.pt --data_path TDdata/TrainData.csv --output features/train_features.npz --save_labels
 
 # 查看已保存的特征
 python scripts/extract_features.py --view features/train_features.npz
@@ -533,8 +533,17 @@ labels = data['labels']  # (n_samples,)
 使用 `baseline_comparison.py` 与其他时序分类模型进行对比：
 
 ```bash
-# 运行所有基线模型对比
+# 运行所有基线模型对比（默认从训练集分出30%作为测试集）
 python scripts/baseline_comparison.py --data_path TDdata/TrainData.csv --epochs 50
+
+# 指定独立测试集
+python scripts/baseline_comparison.py --data_path TDdata/TrainData.csv --test_path TDdata/TestData.csv --epochs 50
+
+# 使用全部训练数据作为测试集（test_split=0）
+python scripts/baseline_comparison.py --data_path TDdata/TrainData.csv --test_split 0 --epochs 50
+
+# 自定义测试集划分比例（例如20%）
+python scripts/baseline_comparison.py --data_path TDdata/TrainData.csv --test_split 0.2 --epochs 50
 
 # 只对比特定模型
 python scripts/baseline_comparison.py --data_path TDdata/TrainData.csv --models lstm bilstm transformer
@@ -542,6 +551,25 @@ python scripts/baseline_comparison.py --data_path TDdata/TrainData.csv --models 
 # 包含 TimeMixer++ 一起对比
 python scripts/baseline_comparison.py --data_path TDdata/TrainData.csv --include_timemixer
 ```
+
+### baseline_comparison.py 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--data_path` | str | **必需** | 训练数据路径 |
+| `--test_path` | str | None | 测试数据路径（可选） |
+| `--test_split` | float | 0.3 | 测试集划分比例（若未指定 test_path） |
+| `--models` | list | all | 要对比的模型列表 |
+| `--include_timemixer` | flag | - | 是否包含 TimeMixer++ |
+| `--epochs` | int | 50 | 训练轮数 |
+| `--batch_size` | int | 32 | 批大小 |
+| `--lr` | float | 1e-3 | 学习率 |
+| `--val_split` | float | 0.2 | 验证集划分比例 |
+
+**测试集逻辑**：
+- 若指定 `--test_path`：使用独立测试集
+- 若 `--test_split > 0`：从训练数据中划分指定比例作为测试集
+- 若 `--test_split = 0`：使用全部训练数据作为测试集（训练完后在同一数据上测试）
 
 ### 可用的基线模型
 
@@ -581,18 +609,22 @@ register_model(
 ### 输出示例
 
 ```
-================================================================================
- Comparison Results
-================================================================================
-Model                    Params      Acc       F1    AUROC      FPR      FNR
---------------------------------------------------------------------------------
-timemixer++              52,481   0.8520   0.8456   0.9123   0.1234   0.1567
-transformer              45,123   0.8234   0.8123   0.8901   0.1456   0.1789
-lstm_transformer         38,567   0.8156   0.8045   0.8756   0.1567   0.1890
-cnn_bilstm               34,234   0.8089   0.7956   0.8678   0.1678   0.1956
-bilstm                   28,456   0.7945   0.7823   0.8534   0.1789   0.2067
-lstm                     24,123   0.7834   0.7712   0.8423   0.1890   0.2178
-================================================================================
+==========================================================================================
+ Test Set Results
+==========================================================================================
+Model                    Params      Acc     Prec   Recall       F1    AUROC      FPR      FNR
+------------------------------------------------------------------------------------------
+timemixer++              52,481   0.8520   0.8456   0.8567   0.8511   0.9123   0.1234   0.1433
+transformer              45,123   0.8234   0.8123   0.8234   0.8178   0.8901   0.1456   0.1766
+lstm_transformer         38,567   0.8156   0.8045   0.8167   0.8106   0.8756   0.1567   0.1833
+cnn_bilstm               34,234   0.8089   0.7956   0.8078   0.8017   0.8678   0.1678   0.1922
+bilstm                   28,456   0.7945   0.7823   0.7934   0.7878   0.8534   0.1789   0.2066
+lstm                     24,123   0.7834   0.7712   0.7823   0.7767   0.8423   0.1890   0.2177
+==========================================================================================
+
+指标说明:
+  FPR (误报率) = FP / (FP + TN) - 实际为负类但被预测为正类的比例
+  FNR (漏报率) = FN / (TP + FN) - 实际为正类但被预测为负类的比例 (= 1 - Recall)
 ```
 
 ## 消融实验
@@ -600,12 +632,42 @@ lstm                     24,123   0.7834   0.7712   0.8423   0.1890   0.2178
 使用 `ablation_study.py` 分析各组件的贡献：
 
 ```bash
-# 运行所有消融实验
+# 运行所有消融实验（默认从训练集分出30%作为测试集）
 python scripts/ablation_study.py --data_path TDdata/TrainData.csv --epochs 50
+
+# 指定独立测试集
+python scripts/ablation_study.py --data_path TDdata/TrainData.csv --test_path TDdata/TestData.csv --epochs 50
+
+# 使用全部训练数据作为测试集（test_split=0）
+python scripts/ablation_study.py --data_path TDdata/TrainData.csv --test_split 0 --epochs 50
+
+# 自定义测试集划分比例（例如20%）
+python scripts/ablation_study.py --data_path TDdata/TrainData.csv --test_split 0.2 --epochs 50
 
 # 只运行特定消融
 python scripts/ablation_study.py --data_path TDdata/TrainData.csv --ablations full no_tid no_mcm
 ```
+
+### ablation_study.py 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--data_path` | str | **必需** | 训练数据路径 |
+| `--test_path` | str | None | 测试数据路径（可选） |
+| `--test_split` | float | 0.3 | 测试集划分比例（若未指定 test_path） |
+| `--ablations` | list | all | 要运行的消融实验列表 |
+| `--epochs` | int | 50 | 训练轮数 |
+| `--batch_size` | int | 32 | 批大小 |
+| `--lr` | float | 1e-3 | 学习率 |
+| `--d_model` | int | 64 | 基础隐藏维度 |
+| `--n_layers` | int | 2 | 基础层数 |
+| `--top_k` | int | 3 | 基础 Top-K |
+| `--val_split` | float | 0.2 | 验证集划分比例 |
+
+**测试集逻辑**：
+- 若指定 `--test_path`：使用独立测试集
+- 若 `--test_split > 0`：从训练数据中划分指定比例作为测试集
+- 若 `--test_split = 0`：使用全部训练数据作为测试集（训练完后在同一数据上测试）
 
 ### 可用的消融实验
 
@@ -627,18 +689,18 @@ python scripts/ablation_study.py --data_path TDdata/TrainData.csv --ablations fu
 ### 输出示例
 
 ```
-==========================================================================================
- Ablation Study Results
-==========================================================================================
-Ablation             Description                         Params      Acc       F1    AUROC
-------------------------------------------------------------------------------------------
-full                 Complete TimeMixer++ model          52,481   0.8520   0.8456   0.9123
-no_mrm               Simple average instead of amp..     52,481   0.8423   0.8345   0.9012
-no_mcm               No cross-scale mixing               48,234   0.8312   0.8234   0.8901
-no_tid               No seasonal/trend decomposition     45,678   0.8178   0.8089   0.8789
-no_fft               Fixed periods instead of FFT        52,481   0.8045   0.7956   0.8678
-single_scale         No multi-scale processing           35,234   0.7823   0.7712   0.8456
-==========================================================================================
+====================================================================================================
+ Ablation Study - Test Set Results
+====================================================================================================
+Ablation         Description                       Params      Acc       F1    AUROC      FPR      FNR
+----------------------------------------------------------------------------------------------------
+full             Complete TimeMixer++ model        52,481   0.8520   0.8456   0.9123   0.1234   0.1433
+no_mrm           Simple average instead of..       52,481   0.8423   0.8345   0.9012   0.1345   0.1544
+no_mcm           No cross-scale mixing             48,234   0.8312   0.8234   0.8901   0.1456   0.1655
+no_tid           No seasonal/trend decompos..      45,678   0.8178   0.8089   0.8789   0.1567   0.1766
+no_fft           Fixed periods instead of FFT      52,481   0.8045   0.7956   0.8678   0.1678   0.1877
+single_scale     No multi-scale processing         35,234   0.7823   0.7712   0.8456   0.1789   0.2066
+====================================================================================================
 
 Relative F1 (vs Full Model):
   no_mrm: -0.0111 (-1.3%)
@@ -646,6 +708,10 @@ Relative F1 (vs Full Model):
   no_tid: -0.0367 (-4.3%)
   no_fft: -0.0500 (-5.9%)
   single_scale: -0.0744 (-8.8%)
+
+指标说明:
+  FPR (误报率) = FP / (FP + TN) - 实际为负类但被预测为正类的比例
+  FNR (漏报率) = FN / (TP + FN) - 实际为正类但被预测为负类的比例 (= 1 - Recall)
 ```
 
 ## 许可

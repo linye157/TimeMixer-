@@ -206,7 +206,7 @@ def main():
     
     # Load checkpoint
     logger.info(f"Loading checkpoint: {args.checkpoint}")
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     
     # Reconstruct config
     if 'config' in checkpoint:

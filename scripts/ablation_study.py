@@ -16,8 +16,17 @@ Ablation experiments:
 8. Different d_model sizes
 
 Usage:
+    # 使用默认划分（从训练集分出30%作为测试集）
     python scripts/ablation_study.py --data_path TDdata/TrainData.csv --epochs 50
-    python scripts/ablation_study.py --data_path TDdata/TrainData.csv --ablations no_mrti no_tid
+    
+    # 指定独立测试集
+    python scripts/ablation_study.py --data_path TDdata/TrainData.csv --test_path TDdata/TestData.csv --epochs 50
+    
+    # 使用全部训练数据作为测试集（test_split=0）
+    python scripts/ablation_study.py --data_path TDdata/TrainData.csv --test_split 0 --epochs 50
+    
+    # 只运行特定消融
+    python scripts/ablation_study.py --data_path TDdata/TrainData.csv --ablations full no_tid no_mcm
 """
 
 import sys
@@ -362,8 +371,8 @@ def train_model(
     lr: float,
     device: torch.device,
     model_name: str
-) -> Dict[str, Any]:
-    """Train a model and return best metrics."""
+) -> nn.Module:
+    """Train a model and return the trained model."""
     model = model.to(device)
     
     # Initialize dynamic layers
@@ -380,7 +389,7 @@ def train_model(
     criterion = nn.BCEWithLogitsLoss()
     
     best_f1 = 0.0
-    best_metrics = {}
+    best_state = None
     
     for epoch in range(epochs):
         model.train()
@@ -415,18 +424,50 @@ def train_model(
         
         if metrics['f1'] > best_f1:
             best_f1 = metrics['f1']
-            best_metrics = metrics.copy()
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
         
         if (epoch + 1) % 10 == 0:
             logger.info(f"  [{model_name}] Epoch {epoch+1}/{epochs}: Loss={train_loss.avg:.4f}, F1={metrics['f1']:.4f}")
     
-    return best_metrics
+    # Load best state
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    
+    return model
+
+
+def evaluate_model(
+    model: nn.Module,
+    test_loader: DataLoader,
+    device: torch.device
+) -> Dict[str, Any]:
+    """Evaluate a model on test set and return metrics."""
+    model.eval()
+    all_preds = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for batch_x, batch_y in test_loader:
+            batch_x = batch_x.to(device)
+            output = model(batch_x)
+            all_preds.append(output['probs'].cpu().numpy())
+            all_labels.append(batch_y.numpy())
+    
+    all_preds = np.concatenate(all_preds).squeeze()
+    all_labels = np.concatenate(all_labels).squeeze()
+    
+    return compute_metrics(all_labels, all_preds)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='TimeMixer++ Ablation Study')
     
-    parser.add_argument('--data_path', type=str, required=True, help='Path to data')
+    parser.add_argument('--data_path', type=str, required=True, help='Path to training data')
+    parser.add_argument('--test_path', type=str, default=None,
+                        help='Path to test data file (optional). If not provided, split from training data')
+    parser.add_argument('--test_split', type=float, default=0.3,
+                        help='Test split ratio if test_path not provided (default: 0.3). '
+                             'If 0, use all training data as test set')
     parser.add_argument('--ablations', nargs='+', default=None,
                         help=f'Ablations to run. Available: {list_ablations()}. Default: all')
     
@@ -436,13 +477,95 @@ def parse_args():
     parser.add_argument('--d_model', type=int, default=64, help='Base hidden dimension')
     parser.add_argument('--n_layers', type=int, default=2, help='Base number of layers')
     parser.add_argument('--top_k', type=int, default=3, help='Base top-K')
-    parser.add_argument('--val_split', type=float, default=0.2, help='Validation split')
+    parser.add_argument('--val_split', type=float, default=0.2, help='Validation split from training data')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--device', type=str, default='auto', help='Device')
     parser.add_argument('--output', type=str, default='results/ablation_study.json',
                         help='Path to save results')
     
     return parser.parse_args()
+
+
+def prepare_data(args, device):
+    """
+    Prepare training, validation, and test data loaders.
+    
+    Returns:
+        train_loader, val_loader, test_loader, normalizer_stats
+    """
+    from torch.utils.data import TensorDataset
+    
+    # Load training data
+    logger.info(f"Loading training data: {args.data_path}")
+    _, X_train, y_train = load_file_strict(args.data_path)
+    logger.info(f"Training data shape: X={X_train.shape}, y={y_train.shape}")
+    
+    # Handle test data
+    if args.test_path:
+        # Use provided test set
+        logger.info(f"Loading test data: {args.test_path}")
+        _, X_test, y_test = load_file_strict(args.test_path)
+        logger.info(f"Test data shape: X={X_test.shape}, y={y_test.shape}")
+    elif args.test_split == 0:
+        # Use all training data as test set
+        logger.info("Using all training data as test set (test_split=0)")
+        X_test, y_test = X_train.copy(), y_train.copy()
+    else:
+        # Split from training data
+        logger.info(f"Splitting {args.test_split*100:.0f}% of training data as test set")
+        n_samples = len(X_train)
+        n_test = int(n_samples * args.test_split)
+        
+        np.random.seed(args.seed)
+        indices = np.random.permutation(n_samples)
+        test_indices = indices[:n_test]
+        train_indices = indices[n_test:]
+        
+        X_test, y_test = X_train[test_indices], y_train[test_indices]
+        X_train, y_train = X_train[train_indices], y_train[train_indices]
+        logger.info(f"After split - Train: {len(X_train)}, Test: {len(X_test)}")
+    
+    # Normalize training data
+    mean = X_train.mean()
+    std = X_train.std() + 1e-8
+    X_train_norm = (X_train - mean) / std
+    X_test_norm = (X_test - mean) / std
+    
+    # Create train/val split
+    n_train = len(X_train_norm)
+    n_val = int(n_train * args.val_split)
+    
+    np.random.seed(args.seed + 1)
+    indices = np.random.permutation(n_train)
+    val_indices = indices[:n_val]
+    train_indices = indices[n_val:]
+    
+    X_train_final = X_train_norm[train_indices]
+    y_train_final = y_train[train_indices]
+    X_val = X_train_norm[val_indices]
+    y_val = y_train[val_indices]
+    
+    logger.info(f"Final split - Train: {len(X_train_final)}, Val: {len(X_val)}, Test: {len(X_test)}")
+    
+    # Create data loaders
+    train_dataset = TensorDataset(
+        torch.tensor(X_train_final, dtype=torch.float32),
+        torch.tensor(y_train_final, dtype=torch.float32)
+    )
+    val_dataset = TensorDataset(
+        torch.tensor(X_val, dtype=torch.float32),
+        torch.tensor(y_val, dtype=torch.float32)
+    )
+    test_dataset = TensorDataset(
+        torch.tensor(X_test_norm, dtype=torch.float32),
+        torch.tensor(y_test, dtype=torch.float32)
+    )
+    
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+    
+    return train_loader, val_loader, test_loader, (mean, std)
 
 
 def main():
@@ -461,15 +584,8 @@ def main():
         device = torch.device(args.device)
     logger.info(f"Using device: {device}")
     
-    # Load data
-    logger.info(f"Loading data: {args.data_path}")
-    _, X, y = load_file_strict(args.data_path)
-    logger.info(f"Data shape: X={X.shape}, y={y.shape}")
-    
-    train_loader, val_loader, _ = create_dataloaders(
-        X, y, batch_size=args.batch_size, val_split=args.val_split,
-        normalize=True, seed=args.seed
-    )
+    # Prepare data
+    train_loader, val_loader, test_loader, normalizer_stats = prepare_data(args, device)
     
     # Select ablations
     ablation_names = args.ablations if args.ablations else list_ablations()
@@ -505,31 +621,36 @@ def main():
         logger.info(f"  Parameters: {n_params:,}")
         
         # Train
-        metrics = train_model(
+        model = train_model(
             model, train_loader, val_loader,
             epochs=args.epochs, lr=args.lr, device=device, model_name=name
         )
         
+        # Evaluate on test set
+        logger.info(f"  Evaluating on test set...")
+        test_metrics = evaluate_model(model, test_loader, device)
+        
         results[name] = {
             'description': ablation.description,
             'params': n_params,
-            **metrics
+            **test_metrics
         }
+        logger.info(f"  Test F1: {test_metrics['f1']:.4f}, FPR: {test_metrics['fpr']:.4f}, FNR: {test_metrics['fnr']:.4f}")
     
     # Print results
-    print("\n" + "=" * 90)
-    print(" Ablation Study Results")
-    print("=" * 90)
-    print(f"{'Ablation':<20} {'Description':<30} {'Params':>10} {'Acc':>8} {'F1':>8} {'AUROC':>8}")
-    print("-" * 90)
+    print("\n" + "=" * 100)
+    print(" Ablation Study - Test Set Results")
+    print("=" * 100)
+    print(f"{'Ablation':<16} {'Description':<26} {'Params':>10} {'Acc':>8} {'F1':>8} {'AUROC':>8} {'FPR':>8} {'FNR':>8}")
+    print("-" * 100)
     
     # Sort by F1 descending
     for name, res in sorted(results.items(), key=lambda x: -x[1].get('f1', 0)):
-        desc = res['description'][:28] + '..' if len(res['description']) > 30 else res['description']
-        print(f"{name:<20} {desc:<30} {res['params']:>10,} {res['accuracy']:>8.4f} "
-              f"{res['f1']:>8.4f} {res['auroc']:>8.4f}")
+        desc = res['description'][:24] + '..' if len(res['description']) > 26 else res['description']
+        print(f"{name:<16} {desc:<26} {res['params']:>10,} {res['accuracy']:>8.4f} "
+              f"{res['f1']:>8.4f} {res['auroc']:>8.4f} {res['fpr']:>8.4f} {res['fnr']:>8.4f}")
     
-    print("=" * 90)
+    print("=" * 100)
     
     # Compute relative performance
     if 'full' in results:
@@ -538,8 +659,13 @@ def main():
         for name, res in results.items():
             if name != 'full':
                 diff = res['f1'] - full_f1
-                pct = (diff / full_f1) * 100
+                pct = (diff / full_f1) * 100 if full_f1 > 0 else 0
                 print(f"  {name}: {diff:+.4f} ({pct:+.1f}%)")
+    
+    # Print metric explanation
+    print("\n指标说明:")
+    print("  FPR (误报率) = FP / (FP + TN) - 实际为负类但被预测为正类的比例")
+    print("  FNR (漏报率) = FN / (TP + FN) - 实际为正类但被预测为负类的比例 (= 1 - Recall)")
     
     # Save results
     os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else '.', exist_ok=True)

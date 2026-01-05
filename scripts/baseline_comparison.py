@@ -11,7 +11,16 @@ Compares TimeMixer++ with baseline models:
 - MLP
 
 Usage:
+    # 使用默认划分（从训练集分出30%作为测试集）
     python scripts/baseline_comparison.py --data_path TDdata/TrainData.csv --epochs 50
+    
+    # 指定独立测试集
+    python scripts/baseline_comparison.py --data_path TDdata/TrainData.csv --test_path TDdata/TestData.csv --epochs 50
+    
+    # 使用全部训练数据作为测试集（test_split=0）
+    python scripts/baseline_comparison.py --data_path TDdata/TrainData.csv --test_split 0 --epochs 50
+    
+    # 只对比特定模型
     python scripts/baseline_comparison.py --data_path TDdata/TrainData.csv --models lstm bilstm transformer
 """
 
@@ -340,14 +349,14 @@ def train_model(
     lr: float,
     device: torch.device,
     model_name: str
-) -> Dict[str, Any]:
-    """Train a model and return metrics."""
+) -> nn.Module:
+    """Train a model and return the trained model."""
     model = model.to(device)
     optimizer = AdamW(model.parameters(), lr=lr)
     criterion = nn.BCEWithLogitsLoss()
     
     best_f1 = 0.0
-    best_metrics = {}
+    best_state = None
     
     for epoch in range(epochs):
         # Train
@@ -386,18 +395,50 @@ def train_model(
         
         if metrics['f1'] > best_f1:
             best_f1 = metrics['f1']
-            best_metrics = metrics.copy()
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
         
         if (epoch + 1) % 10 == 0:
             logger.info(f"  [{model_name}] Epoch {epoch+1}/{epochs}: Loss={train_loss.avg:.4f}, F1={metrics['f1']:.4f}")
     
-    return best_metrics
+    # Load best state
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    
+    return model
+
+
+def evaluate_model(
+    model: nn.Module,
+    test_loader: DataLoader,
+    device: torch.device
+) -> Dict[str, Any]:
+    """Evaluate a model on test set and return metrics."""
+    model.eval()
+    all_preds = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for batch_x, batch_y in test_loader:
+            batch_x = batch_x.to(device)
+            output = model(batch_x)
+            all_preds.append(output['probs'].cpu().numpy())
+            all_labels.append(batch_y.numpy())
+    
+    all_preds = np.concatenate(all_preds).squeeze()
+    all_labels = np.concatenate(all_labels).squeeze()
+    
+    return compute_metrics(all_labels, all_preds)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Baseline model comparison')
     
-    parser.add_argument('--data_path', type=str, required=True, help='Path to data file')
+    parser.add_argument('--data_path', type=str, required=True, help='Path to training data file')
+    parser.add_argument('--test_path', type=str, default=None,
+                        help='Path to test data file (optional). If not provided, split from training data')
+    parser.add_argument('--test_split', type=float, default=0.3,
+                        help='Test split ratio if test_path not provided (default: 0.3). '
+                             'If 0, use all training data as test set')
     parser.add_argument('--models', nargs='+', default=None,
                         help=f'Models to compare. Available: {list_models()}. Default: all')
     parser.add_argument('--include_timemixer', action='store_true',
@@ -407,13 +448,95 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--hidden_dim', type=int, default=64, help='Hidden dimension for all models')
-    parser.add_argument('--val_split', type=float, default=0.2, help='Validation split')
+    parser.add_argument('--val_split', type=float, default=0.2, help='Validation split from training data')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--device', type=str, default='auto', help='Device')
     parser.add_argument('--output', type=str, default='results/baseline_comparison.json',
                         help='Path to save results')
     
     return parser.parse_args()
+
+
+def prepare_data(args, device):
+    """
+    Prepare training, validation, and test data loaders.
+    
+    Returns:
+        train_loader, val_loader, test_loader, normalizer_stats
+    """
+    from torch.utils.data import TensorDataset
+    
+    # Load training data
+    logger.info(f"Loading training data: {args.data_path}")
+    _, X_train, y_train = load_file_strict(args.data_path)
+    logger.info(f"Training data shape: X={X_train.shape}, y={y_train.shape}")
+    
+    # Handle test data
+    if args.test_path:
+        # Use provided test set
+        logger.info(f"Loading test data: {args.test_path}")
+        _, X_test, y_test = load_file_strict(args.test_path)
+        logger.info(f"Test data shape: X={X_test.shape}, y={y_test.shape}")
+    elif args.test_split == 0:
+        # Use all training data as test set
+        logger.info("Using all training data as test set (test_split=0)")
+        X_test, y_test = X_train.copy(), y_train.copy()
+    else:
+        # Split from training data
+        logger.info(f"Splitting {args.test_split*100:.0f}% of training data as test set")
+        n_samples = len(X_train)
+        n_test = int(n_samples * args.test_split)
+        
+        np.random.seed(args.seed)
+        indices = np.random.permutation(n_samples)
+        test_indices = indices[:n_test]
+        train_indices = indices[n_test:]
+        
+        X_test, y_test = X_train[test_indices], y_train[test_indices]
+        X_train, y_train = X_train[train_indices], y_train[train_indices]
+        logger.info(f"After split - Train: {len(X_train)}, Test: {len(X_test)}")
+    
+    # Normalize training data
+    mean = X_train.mean()
+    std = X_train.std() + 1e-8
+    X_train_norm = (X_train - mean) / std
+    X_test_norm = (X_test - mean) / std
+    
+    # Create train/val split
+    n_train = len(X_train_norm)
+    n_val = int(n_train * args.val_split)
+    
+    np.random.seed(args.seed + 1)
+    indices = np.random.permutation(n_train)
+    val_indices = indices[:n_val]
+    train_indices = indices[n_val:]
+    
+    X_train_final = X_train_norm[train_indices]
+    y_train_final = y_train[train_indices]
+    X_val = X_train_norm[val_indices]
+    y_val = y_train[val_indices]
+    
+    logger.info(f"Final split - Train: {len(X_train_final)}, Val: {len(X_val)}, Test: {len(X_test)}")
+    
+    # Create data loaders
+    train_dataset = TensorDataset(
+        torch.tensor(X_train_final, dtype=torch.float32),
+        torch.tensor(y_train_final, dtype=torch.float32)
+    )
+    val_dataset = TensorDataset(
+        torch.tensor(X_val, dtype=torch.float32),
+        torch.tensor(y_val, dtype=torch.float32)
+    )
+    test_dataset = TensorDataset(
+        torch.tensor(X_test_norm, dtype=torch.float32),
+        torch.tensor(y_test, dtype=torch.float32)
+    )
+    
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+    
+    return train_loader, val_loader, test_loader, (mean, std)
 
 
 def main():
@@ -434,19 +557,8 @@ def main():
         device = torch.device(args.device)
     logger.info(f"Using device: {device}")
     
-    # Load data
-    logger.info(f"Loading data: {args.data_path}")
-    _, X, y = load_file_strict(args.data_path)
-    logger.info(f"Data shape: X={X.shape}, y={y.shape}")
-    
-    # Create dataloaders
-    train_loader, val_loader, _ = create_dataloaders(
-        X, y,
-        batch_size=args.batch_size,
-        val_split=args.val_split,
-        normalize=True,
-        seed=args.seed
-    )
+    # Prepare data
+    train_loader, val_loader, test_loader, normalizer_stats = prepare_data(args, device)
     
     # Select models
     model_names = args.models if args.models else list_models()
@@ -455,7 +567,7 @@ def main():
     # Results
     results = {}
     
-    # Train each baseline model
+    # Train and evaluate each baseline model
     for name in model_names:
         if name not in MODEL_REGISTRY:
             logger.warning(f"Unknown model: {name}, skipping")
@@ -468,16 +580,22 @@ def main():
         n_params = sum(p.numel() for p in model.parameters())
         logger.info(f"  Parameters: {n_params:,}")
         
-        metrics = train_model(
+        # Train model
+        model = train_model(
             model, train_loader, val_loader,
             epochs=args.epochs, lr=args.lr, device=device, model_name=name
         )
         
+        # Evaluate on test set
+        logger.info(f"  Evaluating on test set...")
+        test_metrics = evaluate_model(model, test_loader, device)
+        
         results[name] = {
             'params': n_params,
             'description': MODEL_REGISTRY[name].description,
-            **metrics
+            **test_metrics
         }
+        logger.info(f"  Test F1: {test_metrics['f1']:.4f}, FPR: {test_metrics['fpr']:.4f}, FNR: {test_metrics['fnr']:.4f}")
     
     # Include TimeMixer++ if requested
     if args.include_timemixer:
@@ -492,29 +610,40 @@ def main():
         n_params = sum(p.numel() for p in model.parameters())
         logger.info(f"  Parameters: {n_params:,}")
         
-        metrics = train_model(
+        # Train model
+        model = train_model(
             model, train_loader, val_loader,
             epochs=args.epochs, lr=args.lr, device=device, model_name='TimeMixer++'
         )
         
+        # Evaluate on test set
+        logger.info(f"  Evaluating on test set...")
+        test_metrics = evaluate_model(model, test_loader, device)
+        
         results['timemixer++'] = {
             'params': n_params,
             'description': 'TimeMixer++ (ours)',
-            **metrics
+            **test_metrics
         }
+        logger.info(f"  Test F1: {test_metrics['f1']:.4f}, FPR: {test_metrics['fpr']:.4f}, FNR: {test_metrics['fnr']:.4f}")
     
     # Print results
-    print("\n" + "=" * 80)
-    print(" Comparison Results")
-    print("=" * 80)
-    print(f"{'Model':<20} {'Params':>10} {'Acc':>8} {'F1':>8} {'AUROC':>8} {'FPR':>8} {'FNR':>8}")
-    print("-" * 80)
+    print("\n" + "=" * 90)
+    print(" Test Set Results")
+    print("=" * 90)
+    print(f"{'Model':<20} {'Params':>10} {'Acc':>8} {'Prec':>8} {'Recall':>8} {'F1':>8} {'AUROC':>8} {'FPR':>8} {'FNR':>8}")
+    print("-" * 90)
     
     for name, res in sorted(results.items(), key=lambda x: -x[1].get('f1', 0)):
-        print(f"{name:<20} {res['params']:>10,} {res['accuracy']:>8.4f} {res['f1']:>8.4f} "
-              f"{res['auroc']:>8.4f} {res['fpr']:>8.4f} {res['fnr']:>8.4f}")
+        print(f"{name:<20} {res['params']:>10,} {res['accuracy']:>8.4f} {res['precision']:>8.4f} "
+              f"{res['recall']:>8.4f} {res['f1']:>8.4f} {res['auroc']:>8.4f} {res['fpr']:>8.4f} {res['fnr']:>8.4f}")
     
-    print("=" * 80)
+    print("=" * 90)
+    
+    # Print metric explanation
+    print("\n指标说明:")
+    print("  FPR (误报率) = FP / (FP + TN) - 实际为负类但被预测为正类的比例")
+    print("  FNR (漏报率) = FN / (TP + FN) - 实际为正类但被预测为负类的比例 (= 1 - Recall)")
     
     # Save results
     os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else '.', exist_ok=True)
