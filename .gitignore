@@ -1,0 +1,7 @@
+.vscode
+.pytest_cache
+checkpoints
+TDdata
+tests/__pycache__
+Comma.md
+src/timemixerpp/__pycache__/
