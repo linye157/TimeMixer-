@@ -16,7 +16,8 @@ Usage:
 
 
     # 检索 + 概率融合预测
-    python scripts/query_rag_3scales.py --npz_path features/alldata_features_no_tid.npz --ckpt_path runs/emb_exp1/checkpoint.pt --qdrant_url http://localhost:6333 --collection_prefix accident_kb_no_tid --query_index 123 --top_k 10 --retrieve_only false --gamma 10 --fusion_mode fixed
+    # 查询（融合预测模式，输出保留1位小数）
+python scripts/query_rag_3scales.py --npz_path features/alldata_features_no_tid.npz --ckpt_path runs/emb_exp1/checkpoint.pt --qdrant_url http://localhost:6333 --collection_prefix accident_kb_no_tid --query_index 123 --retrieve_only false --gamma 10
 
 """
 
@@ -277,9 +278,13 @@ def format_full_display(
     lines.append("=" * 70)
     lines.append(f"  融合模式: {fusion_result['mode']}")
     lines.append(f"  尺度权重: w0={fusion_result['weights'][0]:.3f}, w1={fusion_result['weights'][1]:.3f}, w2={fusion_result['weights'][2]:.3f}")
-    lines.append(f"  各尺度概率: p0={scale_results[0][0]:.4f}, p1={scale_results[1][0]:.4f}, p2={scale_results[2][0]:.4f}")
-    lines.append(f"  融合概率: {fusion_result['probability']:.4f}")
-    lines.append(f"  预测: {'正类 (事故风险高)' if fusion_result['probability'] >= 0.5 else '负类 (事故风险低)'}")
+    
+    # Format probabilities with both raw and 1-decimal display
+    p0, p1, p2 = scale_results[0][0], scale_results[1][0], scale_results[2][0]
+    fused_prob = fusion_result['probability']
+    lines.append(f"  各尺度概率: p0={p0:.4f} ({p0:.1f}), p1={p1:.4f} ({p1:.1f}), p2={p2:.4f} ({p2:.1f})")
+    lines.append(f"  融合概率: {fused_prob:.4f} (展示: {fused_prob:.1f})")
+    lines.append(f"  预测: {'正类 (事故风险高)' if fused_prob >= 0.5 else '负类 (事故风险低)'}")
     
     # Comparison with true label
     pred = 1 if fusion_result['probability'] >= 0.5 else 0
@@ -490,11 +495,17 @@ def main():
                     }
                     for i, (prob, weighted_results) in enumerate(scale_results)
                 ],
-                'fusion': fusion_result,
+                'fusion': {
+                    **fusion_result,
+                    'probability_1d': round(fusion_result['probability'], 1),  # 保留1位小数展示
+                },
                 'explanation': {
                     'p0': p0,
+                    'p0_1d': round(p0, 1),
                     'p1': p1,
+                    'p1_1d': round(p1, 1),
                     'p2': p2,
+                    'p2_1d': round(p2, 1),
                     'w0': weights[0],
                     'w1': weights[1],
                     'w2': weights[2],

@@ -870,28 +870,56 @@ python scripts/train_embedding.py \
     --lr 1e-3 \
     --use_bce true \
     --lambda_bce 0.5 \
-    --balanced_sampling true
+    --balanced_sampling true \
+    --fusion_mode fixed \
+    --w0 0.5 --w1 0.3 --w2 0.2 \
+    --best_metric nll
 ```
 
 **训练脚本参数**：
 
-| 参数                    | 类型  | 默认值         | 说明                                    |
-| ----------------------- | ----- | -------------- | --------------------------------------- |
-| `--npz_path`          | str   | **必需** | 多尺度特征 NPZ 文件路径                 |
-| `--out_dir`           | str   | **必需** | 输出目录（checkpoint、splits、metrics） |
-| `--emb_dim`           | int   | 128            | Embedding 维度                          |
-| `--hidden_dim`        | int   | 128            | Conv 层隐藏维度                         |
-| `--tau`               | float | 0.07           | SupCon 温度参数                         |
-| `--use_bce`           | str   | false          | 是否联合训练 BCE 分类头                 |
-| `--lambda_bce`        | float | 0.5            | BCE 损失权重                            |
-| `--scale_weights`     | str   | 0.5,0.3,0.2    | 三尺度损失权重                          |
-| `--epochs`            | int   | 20             | 训练轮数                                |
-| `--batch_size`        | int   | 256            | 批大小                                  |
-| `--balanced_sampling` | str   | false          | 是否平衡采样（处理类别不平衡）          |
+| 参数                    | 类型  | 默认值         | 说明                                           |
+| ----------------------- | ----- | -------------- | ---------------------------------------------- |
+| `--npz_path`          | str   | **必需** | 多尺度特征 NPZ 文件路径                        |
+| `--out_dir`           | str   | **必需** | 输出目录（checkpoint、splits、metrics）        |
+| `--emb_dim`           | int   | 128            | Embedding 维度                                 |
+| `--hidden_dim`        | int   | 128            | Conv 层隐藏维度                                |
+| `--tau`               | float | 0.07           | SupCon 温度参数                                |
+| `--use_bce`           | str   | false          | 是否联合训练 BCE 分类头（概率评估必须为 true） |
+| `--lambda_bce`        | float | 0.5            | BCE 损失权重                                   |
+| `--scale_weights`     | str   | 0.5,0.3,0.2    | 三尺度损失权重                                 |
+| `--fusion_mode`       | str   | fixed          | 融合模式（fixed/learned）                      |
+| `--w0, --w1, --w2`    | float | 0.5,0.3,0.2    | 三尺度融合权重（fixed 模式）                   |
+| `--best_metric`       | str   | nll            | checkpoint 选择指标（nll/brier，越小越好）     |
+| `--epochs`            | int   | 20             | 训练轮数                                       |
+| `--batch_size`        | int   | 256            | 批大小                                         |
+| `--balanced_sampling` | str   | false          | 是否平衡采样（处理类别不平衡）                 |
+
+**概率预测模式**：
+
+训练脚本已升级为概率预测模式，评估使用三尺度融合概率：
+
+```
+p0 = sigmoid(logits0)
+p1 = sigmoid(logits1) 
+p2 = sigmoid(logits2)
+p = w0*p0 + w1*p1 + w2*p2  (融合概率)
+```
+
+**评估指标**：
+
+| 指标     | 说明                                      | 是否主要指标 |
+| -------- | ----------------------------------------- | ------------ |
+| NLL      | 负对数似然 (Binary Cross Entropy)         | ✓ 主要      |
+| Brier    | Brier Score = mean((p - label)²)         | ✓ 主要      |
+| MAE      | Mean Absolute Error = mean(\|p - label\|) | ✓ 主要      |
+| Accuracy | 准确率（threshold=0.5）                   | 参考         |
+| F1       | F1 Score（threshold=0.5）                 | 参考         |
+| AUROC    | ROC 曲线下面积                            | 参考         |
 
 **输出文件**：
 
-- `runs/emb_exp1/checkpoint.pt` - 模型 checkpoint
+- `runs/emb_exp1/checkpoint.pt` - 模型 checkpoint（按 best_metric 选择最优）
 - `runs/emb_exp1/splits.json` - 数据划分（train/val/test）
 - `runs/emb_exp1/metrics.json` - 训练指标
 
@@ -991,25 +1019,25 @@ python scripts/query_rag_3scales.py \
 
 **查询脚本参数**：
 
-| 参数              | 类型  | 默认值         | 说明                                                       |
-| ----------------- | ----- | -------------- | ---------------------------------------------------------- |
-| `--query_index`   | int   | **必需**       | 查询样本在 NPZ 中的索引                                    |
-| `--top_k`         | int   | 10             | 检索的相似样本数                                           |
-| `--retrieve_only` | str   | true           | 仅检索不预测（true=只看相似样本，false=融合预测）          |
-| `--exclude_self`  | str   | true           | 过滤掉查询样本本身（避免 top1 永远是自己）                 |
-| `--min_results`   | int   | 10             | 额外请求的结果数（确保过滤后有足够 top_k）                 |
-| `--gamma`         | float | 10.0           | 相似度加权系数（仅 retrieve_only=false 时生效）            |
-| `--fusion_mode`   | str   | fixed          | 融合模式（fixed/learned，仅 retrieve_only=false 时生效）   |
-| `--w0, w1, w2`    | float | 0.5,0.3,0.2    | 固定融合权重（仅 retrieve_only=false 时生效）              |
-| `--json_output`   | str   | false          | 输出 JSON 格式                                             |
-| `--output_file`   | str   | None           | JSON 输出文件路径                                          |
+| 参数                | 类型  | 默认值         | 说明                                                     |
+| ------------------- | ----- | -------------- | -------------------------------------------------------- |
+| `--query_index`   | int   | **必需** | 查询样本在 NPZ 中的索引                                  |
+| `--top_k`         | int   | 10             | 检索的相似样本数                                         |
+| `--retrieve_only` | str   | true           | 仅检索不预测（true=只看相似样本，false=融合预测）        |
+| `--exclude_self`  | str   | true           | 过滤掉查询样本本身（避免 top1 永远是自己）               |
+| `--min_results`   | int   | 10             | 额外请求的结果数（确保过滤后有足够 top_k）               |
+| `--gamma`         | float | 10.0           | 相似度加权系数（仅 retrieve_only=false 时生效）          |
+| `--fusion_mode`   | str   | fixed          | 融合模式（fixed/learned，仅 retrieve_only=false 时生效） |
+| `--w0, w1, w2`    | float | 0.5,0.3,0.2    | 固定融合权重（仅 retrieve_only=false 时生效）            |
+| `--json_output`   | str   | false          | 输出 JSON 格式                                           |
+| `--output_file`   | str   | None           | JSON 输出文件路径                                        |
 
 **两种模式说明**：
 
-| 模式       | 参数                              | 用途           | 输出内容                             |
-| ---------- | --------------------------------- | -------------- | ------------------------------------ |
-| 仅检索     | `--retrieve_only true`（默认）    | 查看相似样本   | 三尺度 TopK 列表（id, label, score） |
-| 融合预测   | `--retrieve_only false`           | 基于相似样本预测 | TopK + 概率融合 + 预测结果         |
+| 模式     | 参数                             | 用途             | 输出内容                             |
+| -------- | -------------------------------- | ---------------- | ------------------------------------ |
+| 仅检索   | `--retrieve_only true`（默认） | 查看相似样本     | 三尺度 TopK 列表（id, label, score） |
+| 融合预测 | `--retrieve_only false`        | 基于相似样本预测 | TopK + 概率融合 + 预测结果           |
 
 **融合公式**（仅 retrieve_only=false 时使用）：
 
@@ -1036,11 +1064,11 @@ python scripts/query_rag_3scales.py \
 ----------------------------------------------------------------------
  Scale 0 (48 时间步)
 ----------------------------------------------------------------------
-Rank  ID        Label   Label_raw   Score       
+Rank  ID        Label   Label_raw   Score     
 ------------------------------------------------
-1     456       1       0.9         0.9512      
-2     789       1       0.8         0.9234      
-3     234       0       0.3         0.9012      
+1     456       1       0.9         0.9512    
+2     789       1       0.8         0.9234    
+3     234       0       0.3         0.9012    
 ...
 
 ======================================================================
@@ -1078,11 +1106,11 @@ Rank  ID        Label   Label_raw   Score
 ----------------------------------------------------------------------
  Scale 0 (48 时间步) - 概率: 0.7234
 ----------------------------------------------------------------------
-Rank  ID        Label   Score       Weight    
+Rank  ID        Label   Score       Weight  
 ----------------------------------------------
-1     456       1       0.9512      0.3245    
-2     789       1       0.9234      0.2876    
-3     234       0       0.9012      0.2456    
+1     456       1       0.9512      0.3245  
+2     789       1       0.9234      0.2876  
+3     234       0       0.9012      0.2456  
 ...
 
 ======================================================================
@@ -1166,7 +1194,7 @@ python scripts/extract_features.py \
     --ablation no_tid \
     --save_labels
 
-# 2. 训练 Embedding Encoder
+# 2. 训练 Embedding Encoder（概率预测模式）
 python scripts/train_embedding.py \
     --npz_path features/alldata_features_no_tid.npz \
     --out_dir runs/emb_exp1 \
@@ -1175,7 +1203,9 @@ python scripts/train_embedding.py \
     --lr 1e-3 \
     --use_bce true \
     --lambda_bce 0.5 \
-    --balanced_sampling true
+    --balanced_sampling true \
+    --fusion_mode fixed \
+    --best_metric nll
 
 # 3. 入库到 Qdrant（全部数据）
 python scripts/ingest_to_qdrant_3scales.py \
@@ -1186,7 +1216,16 @@ python scripts/ingest_to_qdrant_3scales.py \
     --collection_prefix accident_kb_no_tid \
     --batch_size 256
 
-# 4. 查询
+# 4. 查询（仅检索模式，默认）
+python scripts/query_rag_3scales.py \
+    --npz_path features/alldata_features_no_tid.npz \
+    --ckpt_path runs/emb_exp1/checkpoint.pt \
+    --qdrant_url http://localhost:6333 \
+    --collection_prefix accident_kb_no_tid \
+    --query_index 123 \
+    --top_k 10
+
+# 4b. 查询（融合预测模式）
 python scripts/query_rag_3scales.py \
     --npz_path features/alldata_features_no_tid.npz \
     --ckpt_path runs/emb_exp1/checkpoint.pt \
@@ -1194,10 +1233,9 @@ python scripts/query_rag_3scales.py \
     --collection_prefix accident_kb_no_tid \
     --query_index 123 \
     --top_k 10 \
+    --retrieve_only false \
     --gamma 10 \
-    --fusion_mode fixed \
-    --w0 0.5 --w1 0.3 --w2 0.2 \
-    --json_output true
+    --fusion_mode fixed
 ```
 
 ### 项目新增文件
