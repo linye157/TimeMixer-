@@ -1,25 +1,24 @@
 #!/usr/bin/env python
 """
-将原始时间序列数据直接入库到 Qdrant。
+将原始时间序列数据直接入库到 Qdrant（单 Collection）。
 
 每条数据包含：
 - 48维温度向量作为 embedding
 - label 值存入 payload
 
 适用于简单的相似样本检索，无需训练 embedding encoder。
+注意：此脚本创建单个 Collection，用于 query_raw_qdrant.py 查询。
+如需三尺度知识库，请使用 ingest_to_qdrant_3scales.py。
 
 Usage:
-    # 入库 CSV 文件
-    python scripts/ingest_raw_to_qdrant.py --data_path TDdata/TrainData.csv --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb --recreate
+    REM 入库 CSV 文件
+    python scripts/ingest_raw_to_qdrant.py --data_path TDdata/TrainData.csv --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb --l2_normalize --recreate
 
-    # 入库 Excel 文件
-    python scripts/ingest_raw_to_qdrant.py --data_path TDdata/alldata.xlsx --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb
+    REM 入库 Excel 文件
+    python scripts/ingest_raw_to_qdrant.py --data_path TDdata/alldata.xlsx --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb --l2_normalize
 
-    # 指定 ID 偏移（用于追加数据）
+    REM 指定 ID 偏移（用于追加数据）
     python scripts/ingest_raw_to_qdrant.py --data_path TDdata/TestData.csv --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb --id_offset 1000
-
-    # 使用归一化（推荐，提升检索效果）
-    python scripts/ingest_raw_to_qdrant.py --data_path TDdata/TrainData.csv --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb --normalize
 """
 
 import sys
@@ -191,16 +190,17 @@ def main():
     info = get_collection_info(client, args.collection_name)
     logger.info(f"Collection: {args.collection_name}")
     logger.info(f"  Total points: {info['points_count']}")
-    logger.info(f"  Vector dimension: {vector_dim}")
-    logger.info(f"  Distance metric: {args.distance}")
-    logger.info(f"  Source file: {Path(args.data_path).name}")
+    
+    logger.info(f"Vector dimension: {vector_dim}")
+    logger.info(f"Distance metric: {args.distance}")
+    logger.info(f"Source file: {Path(args.data_path).name}")
     
     if args.normalize:
-        logger.info("  Normalization: z-score")
+        logger.info("Normalization: z-score")
     elif args.l2_normalize:
-        logger.info("  Normalization: L2")
+        logger.info("Normalization: L2")
     else:
-        logger.info("  Normalization: none")
+        logger.info("Normalization: none")
     
     logger.info("=" * 60)
 

@@ -1238,23 +1238,191 @@ python scripts/query_rag_3scales.py \
     --fusion_mode fixed
 ```
 
+## LLM 增强推理系统
+
+本项目支持结合 TimeMixer++ 预测、RAG 投票和 LLM 解释的综合推理系统。
+
+### 系统架构
+
+```
+输入 x(48,) → TimeMixer++ → y1 (可选)
+            → 三尺度知识库检索 → 相似样本 → 加权投票 → y2 (可选)
+            → 证据构建 → LLM → y3 + 权重 + 解释
+            → 最终融合 → final_probability
+```
+
+**注意**：此脚本需要使用 `ingest_to_qdrant_3scales.py` 创建的三尺度知识库（包含 `_scale0`、`_scale1`、`_scale2` 三个 Collection）。
+
+### 依赖安装
+
+```cmd
+REM 安装 Qdrant 客户端
+pip install qdrant-client
+
+REM 安装 Ollama（可选，用于 LLM 功能）
+REM 从 https://ollama.ai 下载安装
+REM 然后拉取模型
+ollama pull qwen2.5:7b
+```
+
+### 使用示例
+
+```cmd
+REM 单条输入（48个逗号分隔的数值），仅 RAG 投票
+python scripts/predict_with_ollama_rag.py --input_inline "25.1,25.3,25.5,25.8,26.0,26.2,26.5,26.8,27.0,27.2,27.5,27.8,28.0,28.2,28.5,28.8,29.0,29.2,29.5,29.8,30.0,30.2,30.5,30.8,31.0,31.2,31.5,31.8,32.0,32.2,32.5,32.8,33.0,33.2,33.5,33.8,34.0,34.2,34.5,34.8,35.0,35.2,35.5,35.8,36.0,36.2,36.5,36.8" --qdrant_url http://localhost:6333 --collection_prefix raw_temperature_kb --use_y2 true --l2_normalize
+
+REM 批量输入（xlsx 文件）
+python scripts/predict_with_ollama_rag.py --data_path TDdata/alldata.xlsx --qdrant_url http://localhost:6333 --collection_prefix raw_temperature_kb --use_y2 true --l2_normalize --output_dir results
+
+REM 批量输入（csv 文件）
+python scripts/predict_with_ollama_rag.py --data_path TDdata/TrainData.csv --qdrant_url http://localhost:6333 --collection_prefix raw_temperature_kb --use_y2 true --l2_normalize --output_dir results
+
+REM 批量输入，指定样本范围
+python scripts/predict_with_ollama_rag.py --data_path TDdata/alldata.xlsx --start_idx 0 --end_idx 100 --qdrant_url http://localhost:6333 --collection_prefix raw_temperature_kb --use_y2 true --l2_normalize --output_dir results
+
+REM 启用 LLM
+python scripts/predict_with_ollama_rag.py --data_path TDdata/alldata.xlsx --qdrant_url http://localhost:6333 --collection_prefix raw_temperature_kb --use_y2 true --l2_normalize --llm_mode all --provide_y2_to_llm true --ollama_url http://localhost:11434 --ollama_model qwen2.5:7b --output_dir results
+
+REM 完整模式：y1 + y2 + LLM
+python scripts/predict_with_ollama_rag.py --data_path TDdata/alldata.xlsx --qdrant_url http://localhost:6333 --collection_prefix raw_temperature_kb --use_y1 true --use_y2 true --timemixer_ckpt checkpoints/best_model.pt --l2_normalize --llm_mode all --provide_y1_to_llm true --provide_y2_to_llm true --output_dir results
+```
+
+### CLI 参数
+
+| 参数                   | 类型  | 默认值                | 说明                                        |
+| ---------------------- | ----- | --------------------- | ------------------------------------------- |
+| `--input_inline`       | str   | -                     | 48维向量（逗号分隔），与 data_path 二选一   |
+| `--data_path`          | str   | -                     | 批量输入文件路径（xlsx 或 csv）             |
+| `--start_idx`          | int   | 0                     | 起始样本索引（批量输入时有效）              |
+| `--end_idx`            | int   | None                  | 结束样本索引（批量输入时有效）              |
+| `--qdrant_url`         | str   | http://localhost:6333 | Qdrant 服务地址                             |
+| `--collection_prefix`  | str   | **必需**              | Collection 前缀（自动添加 _scale0/1/2）     |
+| `--top_k`              | int   | 10                    | 检索的相似样本数                            |
+| `--gamma`              | float | 10.0                  | 相似度加权系数                              |
+| `--fusion_weights`     | str   | 0.5,0.3,0.2           | 三尺度融合权重                              |
+| `--exclude_self`       | str   | true                  | 是否排除自身                                |
+| `--min_results`        | int   | 10                    | 额外请求的结果数（用于过滤）                |
+| `--l2_normalize`       | flag  | -                     | 对查询向量 L2 归一化（需与入库时一致）      |
+| `--use_y1`             | str   | false                 | 是否计算 TimeMixer++ 预测                   |
+| `--use_y2`             | str   | true                  | 是否计算 RAG 投票预测                       |
+| `--timemixer_ckpt`     | str   | None                  | TimeMixer++ checkpoint（use_y1 时需要）     |
+| `--provide_y1_to_llm`  | str   | false                 | 是否将 y1 提供给 LLM                        |
+| `--provide_y2_to_llm`  | str   | false                 | 是否将 y2 提供给 LLM                        |
+| `--llm_mode`           | str   | none                  | LLM 模式：none/top/uncertain/all            |
+| `--threshold`          | float | 0.7                   | 不确定性阈值（uncertain 模式）              |
+| `--delta`              | float | 0.1                   | 概率接近阈值范围（uncertain 模式）          |
+| `--user_confirm`       | str   | true                  | 批量模式下是否需要用户确认                  |
+| `--ollama_url`         | str   | http://localhost:11434| Ollama 服务地址                             |
+| `--ollama_model`       | str   | qwen2.5:7b            | Ollama 模型名称                             |
+| `--temperature`        | float | 0.0                   | LLM 生成温度                                |
+| `--output_dir`         | str   | results               | 输出目录（批量模式）                        |
+
+### 数据输入格式
+
+**xlsx 文件**：
+- Sheet3，4-51 列（共48列）为特征，52 列为标签
+
+**csv 文件**：
+- 无表头，0-47 列（共48列）为特征，48 列为标签
+
+### LLM 模式说明
+
+| 模式        | 说明                                         |
+| ----------- | -------------------------------------------- |
+| `none`      | 不调用 LLM，使用 y1/y2 简单融合              |
+| `top`       | 只对第一个样本调用 LLM                       |
+| `uncertain` | 当预测接近阈值时调用 LLM                     |
+| `all`       | 对所有样本调用 LLM                           |
+
+### 输出格式
+
+**单条输出 JSON**：
+
+```json
+{
+  "sample_id": 0,
+  "true_label": 0.75,
+  "true_label_display": 0.8,
+  "y2_rag_vote": 0.6812,
+  "y2_display": 0.7,
+  "p0": 0.7234,
+  "p1": 0.6512,
+  "p2": 0.6890,
+  "final_probability": 0.6812,
+  "final_probability_display": 0.7,
+  "computation_mode": "y2_only",
+  "retrieved_counts": {"scale0": 10, "scale1": 10, "scale2": 10}
+}
+```
+
+**带 LLM 的输出**：
+
+```json
+{
+  "sample_id": 0,
+  "y1_timemixer": 0.7234,
+  "y2_rag_vote": 0.6812,
+  "y3_llm": 0.7100,
+  "final_probability": 0.7048,
+  "final_probability_display": 0.7,
+  "computation_mode": "llm_fusion",
+  "explanation": {
+    "llm_weights": {"a_y1": 0.3, "a_y2": 0.3, "a_ref": 0.4},
+    "reasoning": "基于相似样本 ID 456、789 的高相似度..."
+  }
+}
+```
+
+**批量输出文件**：
+
+- `results/results.jsonl` - 每行一个样本的完整 JSON
+- `results/results.csv` - 摘要表格（sample_id, final_probability, display, y1, y2, true_label, mode）
+
+### 完整工作流
+
+使用 `predict_with_ollama_rag.py` 需要先创建三尺度知识库。有两种方式：
+
+**方式1：使用多尺度 Embedding 知识库（推荐，效果更好）**
+
+```cmd
+REM 1. 启动 Qdrant
+docker run -p 6333:6333 qdrant/qdrant
+
+REM 2. 提取多尺度特征
+python scripts/extract_features.py --checkpoint checkpoints/best_model.pt --data_path TDdata/alldata.xlsx --ablation no_tid --save_labels
+
+REM 3. 训练 Embedding Encoder
+python scripts/train_embedding.py --npz_path features/alldata_features_no_tid.npz --out_dir runs/emb_exp1 --epochs 20 --use_bce true
+
+REM 4. 入库到三尺度知识库
+python scripts/ingest_to_qdrant_3scales.py --npz_path features/alldata_features_no_tid.npz --ckpt_path runs/emb_exp1/checkpoint.pt --use_all_data --qdrant_url http://localhost:6333 --collection_prefix accident_kb_no_tid
+
+REM 5. 批量预测（从 xlsx 读取）
+python scripts/predict_with_ollama_rag.py --data_path TDdata/alldata.xlsx --qdrant_url http://localhost:6333 --collection_prefix accident_kb_no_tid --use_y2 true --output_dir results
+
+REM 6. 启用 LLM 解释
+ollama serve
+python scripts/predict_with_ollama_rag.py --data_path TDdata/alldata.xlsx --qdrant_url http://localhost:6333 --collection_prefix accident_kb_no_tid --use_y2 true --llm_mode all --provide_y2_to_llm true --ollama_model qwen2.5:7b --output_dir results
+```
+
+**方式2：使用原始数据知识库（简单快速）**
+
+原始数据 RAG 使用 `query_raw_qdrant.py` 进行单 Collection 查询，详见下文"原始数据 RAG 系统"。
+
 ## 原始数据 RAG 系统
 
 除了多尺度 embedding RAG 系统，还支持直接将原始 48 维温度向量存入 Qdrant 进行相似样本检索。
 
 ### 原始数据入库
 
-将 CSV 或 Excel 文件中的原始数据直接存入 Qdrant：
+将 CSV 或 Excel 文件中的原始数据直接存入 Qdrant（单个 Collection）。
 
 ```cmd
 REM 入库 CSV 文件
-python scripts/ingest_raw_to_qdrant.py --data_path TDdata/TrainData.csv --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb --recreate
+python scripts/ingest_raw_to_qdrant.py --data_path TDdata/TrainData.csv --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb --l2_normalize --recreate
 
 REM 入库 Excel 文件
-python scripts/ingest_raw_to_qdrant.py --data_path TDdata/alldata.xlsx --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb
-
-REM 使用 L2 归一化（推荐，提升余弦相似度检索效果）
-python scripts/ingest_raw_to_qdrant.py --data_path TDdata/TrainData.csv --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb --l2_normalize --recreate
+python scripts/ingest_raw_to_qdrant.py --data_path TDdata/alldata.xlsx --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb --l2_normalize
 
 REM 追加数据（使用 ID 偏移避免覆盖）
 python scripts/ingest_raw_to_qdrant.py --data_path TDdata/TestData.csv --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb --id_offset 1000
@@ -1322,11 +1490,13 @@ python scripts/query_raw_qdrant.py --data_path TDdata/TrainData.csv --qdrant_url
 
 ### 原始数据 RAG 完整工作流
 
+原始数据 RAG 使用单个 Collection，通过 `query_raw_qdrant.py` 进行查询。
+
 ```cmd
 REM 1. 启动 Qdrant（Docker）
 docker run -p 6333:6333 qdrant/qdrant
 
-REM 2. 入库原始数据（使用 L2 归一化）
+REM 2. 入库原始数据到单个 Collection
 python scripts/ingest_raw_to_qdrant.py --data_path TDdata/alldata.xlsx --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb --l2_normalize --recreate
 
 REM 3. 查询相似样本（仅检索）
@@ -1334,6 +1504,9 @@ python scripts/query_raw_qdrant.py --data_path TDdata/alldata.xlsx --qdrant_url 
 
 REM 4. 查询并预测
 python scripts/query_raw_qdrant.py --data_path TDdata/alldata.xlsx --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb --query_index 100 --top_k 10 --l2_normalize --retrieve_only false --gamma 10
+
+REM 5. JSON 输出
+python scripts/query_raw_qdrant.py --data_path TDdata/alldata.xlsx --qdrant_url http://localhost:6333 --collection_name raw_temperature_kb --query_index 100 --top_k 10 --l2_normalize --json_output true
 ```
 
 ### 原始数据 vs 多尺度 Embedding 对比
@@ -1355,13 +1528,16 @@ TimeMixer/
 │   ├── metric_encoder.py   # TemporalConvEmbedder, MultiScaleEmbedder
 │   ├── losses.py           # SupConLoss, MultiScaleSupConLoss
 │   ├── qdrant_utils.py     # Qdrant 工具函数
+│   ├── ollama_client.py    # Ollama API 客户端
+│   ├── evidence_builder.py # LLM 证据构建器
 │   └── data.py             # +NPZMultiScaleDataset, create_splits
 ├── scripts/
 │   ├── train_embedding.py          # Embedding 训练脚本
 │   ├── ingest_to_qdrant_3scales.py # 三尺度 Qdrant 入库脚本
 │   ├── query_rag_3scales.py        # 三尺度 RAG 查询脚本
 │   ├── ingest_raw_to_qdrant.py     # 原始数据入库脚本
-│   └── query_raw_qdrant.py         # 原始数据查询脚本
+│   ├── query_raw_qdrant.py         # 原始数据查询脚本
+│   └── predict_with_ollama_rag.py  # LLM 增强推理脚本
 └── runs/                           # 训练输出目录
     └── emb_exp1/
         ├── checkpoint.pt
